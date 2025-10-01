@@ -1,12 +1,25 @@
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from openai import OpenAI
-import json, re
+import os, json, re
 
+# -------------------- Configuração --------------------
 app = FastAPI()
-client = OpenAI(api_key="SUA_CHAVE_OPENAI")
 
-# ---------- helpers de JSON ----------
+# CORS - permitir chamadas do frontend
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],      # você pode colocar seu site aqui
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# OpenAI
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+# -------------------- Helpers JSON --------------------
 def try_load_json(text):
     try:
         return json.loads(text)
@@ -20,7 +33,7 @@ def extract_between_brackets(text):
     return None
 
 def fix_common_issues(text):
-    s = text.replace("None","null").replace("True","true").replace("False","false")
+    s = text.replace("None", "null").replace("True", "true").replace("False", "false")
     s = re.sub(r"(?<!\\)'", '"', s)
     s = re.sub(r",\s*([\]\}])", r"\1", s)
     return s
@@ -33,7 +46,7 @@ def safe_parse_json(text):
             pass
     return None
 
-# ---------- modelos ----------
+# -------------------- Modelos --------------------
 class QuizRequest(BaseModel):
     conteudo: str
     nivel: str
@@ -44,7 +57,24 @@ class RespostaRequest(BaseModel):
     resposta_aluno: str
     resposta_correta: str
 
-# ---------- endpoints ----------
+# -------------------- Funções de Validação --------------------
+def validar_questoes(questoes):
+    questoes_validas = []
+    for q in questoes:
+        if (
+            isinstance(q, dict)
+            and "pergunta" in q
+            and "opcoes" in q
+            and "resposta_correta" in q
+        ):
+            # garante que resposta_correta esteja dentro de opcoes
+            if q["resposta_correta"] not in q["opcoes"]:
+                # tenta corrigir escolhendo a primeira opção como fallback
+                q["resposta_correta"] = q["opcoes"][0]
+            questoes_validas.append(q)
+    return questoes_validas
+
+# -------------------- Endpoints --------------------
 @app.post("/gerar_questoes")
 def gerar_questoes(data: QuizRequest):
     prompt = f"""
@@ -54,6 +84,7 @@ Gere {data.n_questoes} questões originais sobre o tema: "{data.conteudo}", no n
 - Cada questão deve ter 1 resposta correta e 3 incorretas.
 - O campo "resposta_correta" deve conter exatamente o TEXTO de uma das opções listadas em "opcoes".
 - Nunca responda com apenas "A", "B", "C" ou "D". Sempre escreva o texto exato da alternativa correta.
+- Retorne apenas JSON válido, sem explicações adicionais.
 
 Formato JSON válido:
 [
@@ -64,44 +95,44 @@ Formato JSON válido:
   }}
 ]
 """
-    resp = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[{"role":"user","content":prompt}],
-        temperature=0.4,
-        max_tokens=1800
-    )
-    content = resp.choices[0].message.content
-    parsed = safe_parse_json(content)
-    return parsed or {"erro":"Não foi possível gerar JSON válido", "resposta": content}
+    try:
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role":"user","content":prompt}],
+            temperature=0.4,
+            max_tokens=1800
+        )
+        content = resp.choices[0].message.content
+        parsed = safe_parse_json(content)
+        if not parsed:
+            return {"erro": "Não foi possível gerar JSON válido", "resposta": content}
+
+        # validação das questões
+        questoes_validas = validar_questoes(parsed)
+        return questoes_validas
+    except Exception as e:
+        return {"erro": str(e)}
 
 @app.post("/analisar_resposta")
 def analisar_resposta(data: RespostaRequest):
-    # Normaliza para evitar problemas de maiúsculas/minúsculas e espaços extras
-    aluno = data.resposta_aluno.strip().lower()
-    correta = data.resposta_correta.strip().lower()
-
-    acertou = aluno == correta
-
-    if acertou:
-        return {
-            "correto": True,
-            "feedback": f"Parabéns! Você acertou. A resposta correta realmente é: {data.resposta_correta}."
-        }
-    else:
-        # Aqui o modelo ajuda a explicar o erro
-        prompt = f"""
-O aluno errou a questão. Explique resumidamente o motivo do erro.
-
+    prompt = f"""
+Explique resumidamente o possível erro do aluno nesta questão:
 Pergunta: {data.pergunta}
 Resposta correta: {data.resposta_correta}
 Resposta do aluno: {data.resposta_aluno}
 """
+    try:
         resp = client.chat.completions.create(
             model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
+            messages=[{"role":"user","content":prompt}],
             temperature=0
         )
-        return {
-            "correto": False,
-            "feedback": resp.choices[0].message.content
-        }
+        return {"feedback": resp.choices[0].message.content}
+    except Exception as e:
+        return {"erro": str(e)}
+
+# -------------------- Configuração para Render --------------------
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.getenv("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
