@@ -2,9 +2,10 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 from openai import OpenAI
 import json, re
+import os
 
 app = FastAPI()
-client = OpenAI(api_key="SUA_CHAVE_OPENAI")
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # ---------- helpers de JSON ----------
 def try_load_json(text):
